@@ -1,0 +1,167 @@
+import { useState, useCallback, useRef, useEffect } from 'react';
+
+const BASE_URL = 'https://api.elevenlabs.io/v1';
+
+export function useElevenLabs() {
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [error, setError] = useState(null);
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [isConfigured, setIsConfigured] = useState(false);
+  const audioRef = useRef(null);
+
+  // Verificar configuración al iniciar
+  useEffect(() => {
+    const apiKey = import.meta.env.VITE_ELEVENLABS_API_KEY;
+    const voiceId = import.meta.env.VITE_ELEVENLABS_VOICE_ID;
+    
+    if (apiKey && !apiKey.includes('placeholder') && voiceId) {
+      setIsConfigured(true);
+      console.log('✅ ElevenLabs configurado');
+    } else {
+      console.log('🎭 Modo demo: sin API key real');
+    }
+  }, []);
+
+  // Limpiar audio
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        if (audioRef.current.src?.startsWith('blob:')) {
+          URL.revokeObjectURL(audioRef.current.src);
+        }
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  const textToSpeech = useCallback(async (text) => {
+    const apiKey = import.meta.env.VITE_ELEVENLABS_API_KEY;
+    const voiceId = import.meta.env.VITE_ELEVENLABS_VOICE_ID;
+    const modelId = import.meta.env.VITE_ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2';
+
+    // Modo demo
+    if (!apiKey || apiKey.includes('placeholder') || !voiceId) {
+      console.log('🎭 Modo demo activo');
+      return null;
+    }
+
+    if (!text?.trim()) throw new Error('Texto vacío');
+
+    const MAX_CHARS = 2500;
+    const safeText = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
+
+    try {
+      setError(null);
+      
+      const response = await fetch(`${BASE_URL}/text-to-speech/${voiceId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'xi-api-key': apiKey,
+          'Accept': 'audio/mpeg'
+        },
+        body: JSON.stringify({
+          text: safeText,
+          model_id: modelId,
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            speed: 0.9,
+            style: 0.0,
+            use_speaker_boost: true
+          }
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail?.message || `Error ${response.status}`);
+      }
+
+      return await response.blob();
+    } catch (err) {
+      console.error('❌ ElevenLabs error:', err);
+      setError(err.message);
+      return null;
+    }
+  }, []);
+
+  const playAudio = useCallback(async (audioBlob, autoPlay = true) => {
+    if (!audioBlob || (!audioEnabled && !autoPlay)) return null;
+
+    try {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        if (audioRef.current.src?.startsWith('blob:')) {
+          URL.revokeObjectURL(audioRef.current.src);
+        }
+      }
+
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+      audioRef.current = audio;
+      setIsSpeaking(true);
+
+      audio.onended = () => {
+        setIsSpeaking(false);
+        if (audioUrl.startsWith('blob:')) URL.revokeObjectURL(audioUrl);
+      };
+
+      audio.onerror = () => {
+        setIsSpeaking(false);
+        setError('Error de reproducción');
+      };
+
+      if (autoPlay) await audio.play();
+      return audio;
+    } catch (err) {
+      console.error('❌ playAudio error:', err);
+      setIsSpeaking(false);
+      return null;
+    }
+  }, [audioEnabled]);
+
+  const speak = useCallback(async (text, autoPlay = true) => {
+    if (!audioEnabled && !autoPlay) return null;
+    
+    try {
+      const audioBlob = await textToSpeech(text);
+      if (audioBlob && autoPlay) await playAudio(audioBlob, true);
+      return audioBlob;
+    } catch (err) {
+      console.warn('⚠️ Fallback a texto');
+      return null;
+    }
+  }, [textToSpeech, playAudio, audioEnabled]);
+
+  const stopSpeaking = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      if (audioRef.current.src?.startsWith('blob:')) {
+        URL.revokeObjectURL(audioRef.current.src);
+      }
+      audioRef.current = null;
+    }
+    setIsSpeaking(false);
+  }, []);
+
+  const toggleAudio = useCallback(() => {
+    setAudioEnabled(prev => !prev);
+    if (audioRef.current) audioRef.current.pause();
+    setIsSpeaking(false);
+  }, []);
+
+  return {
+    isSpeaking,
+    error,
+    audioEnabled,
+    isConfigured,
+    textToSpeech,
+    playAudio,
+    speak,
+    stopSpeaking,
+    toggleAudio,
+    estimateDuration: (text) => Math.ceil((text.trim().split(/\s+/).length / 150) * 60)
+  };
+}
